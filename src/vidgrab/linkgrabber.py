@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import html
 import re
+from collections import deque
 from collections.abc import Iterable
-from urllib.parse import unquote, urlparse
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode, unquote, urlparse, urlunparse
 
 URL_RE = re.compile(r"https?://[^\s<'\"`)>]+", re.IGNORECASE)
 HREF_SRC_RE = re.compile(r"(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
@@ -41,6 +43,58 @@ CATEGORY_EXTENSIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+@dataclass(frozen=True)
+class LinkCandidate:
+    """A LinkGrabber row discovered from clipboard/page/crawler input."""
+
+    url: str
+    category: str
+    selected: bool = True
+    source_url: str | None = None
+    depth: int = 0
+
+    @classmethod
+    def from_url(cls, url: str, *, source_url: str | None = None, depth: int = 0) -> LinkCandidate:
+        normalized = normalize_url(url)
+        return cls(
+            url=normalized,
+            category=categorize_url(normalized),
+            selected=True,
+            source_url=source_url,
+            depth=depth,
+        )
+
+
+@dataclass(frozen=True)
+class CrawlItem:
+    url: str
+    depth: int
+
+
+class CrawlQueue:
+    """Small FIFO queue that deduplicates normalized URLs and enforces max crawl depth."""
+
+    def __init__(self, max_depth: int = 2) -> None:
+        self.max_depth = max_depth
+        self._queued: deque[CrawlItem] = deque()
+        self._seen: set[str] = set()
+
+    def add(self, url: str, *, depth: int = 0) -> bool:
+        if not should_crawl(depth, self.max_depth):
+            return False
+        normalized = normalize_url(url)
+        if normalized in self._seen:
+            return False
+        self._seen.add(normalized)
+        self._queued.append(CrawlItem(normalized, depth))
+        return True
+
+    def pop_next(self) -> CrawlItem | None:
+        if not self._queued:
+            return None
+        return self._queued.popleft()
+
+
 def extract_urls_from_clipboard_text(text: str) -> list[str]:
     """Extract unique absolute URLs from copied page text or copied HTML."""
     candidates: list[str] = []
@@ -49,7 +103,23 @@ def extract_urls_from_clipboard_text(text: str) -> list[str]:
     candidates.extend(match.group(0) for match in URL_RE.finditer(decoded))
     candidates.extend(match.group(1) for match in HREF_SRC_RE.finditer(decoded))
 
-    return _dedupe(_clean_url(url) for url in candidates if url.lower().startswith(("http://", "https://")))
+    return _dedupe(
+        normalize_url(url) for url in candidates if url.lower().startswith(("http://", "https://"))
+    )
+
+
+def normalize_url(url: str) -> str:
+    """Normalize a URL for dedupe while preserving meaningful path case."""
+    cleaned = _clean_url(url)
+    parsed = urlparse(cleaned)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    port = parsed.port
+    netloc = hostname
+    if port and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
+        netloc = f"{hostname}:{port}"
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
+    return urlunparse((scheme, netloc, parsed.path or "/", "", query, ""))
 
 
 def categorize_url(url: str) -> str:
@@ -59,6 +129,15 @@ def categorize_url(url: str) -> str:
         if path.endswith(extensions):
             return category
     return "page"
+
+
+def apply_category_filter(
+    candidates: Iterable[LinkCandidate], selected_categories: set[str]
+) -> list[LinkCandidate]:
+    """Return candidates whose categories are enabled in the LinkGrabber filter."""
+    if "all" in selected_categories:
+        return list(candidates)
+    return [candidate for candidate in candidates if candidate.category in selected_categories]
 
 
 def should_crawl(current_depth: int, max_depth: int = 2) -> bool:
