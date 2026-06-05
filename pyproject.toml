@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vidgrab-portable"
+version = "0.1.0"
+description = "Portable desktop LinkGrabber-style video/file downloader with archive extraction"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "ShadowedCreations" }]
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "platformdirs>=4.2",
+  "pyperclip>=1.8",
+  "PySide6>=6.7",
+  "watchdog>=4.0",
+  "yt-dlp>=2025.1.15"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.5"
+]
+
+[project.scripts]
+vidgrab = "vidgrab.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vidgrab"]
