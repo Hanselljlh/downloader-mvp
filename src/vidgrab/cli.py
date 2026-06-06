@@ -53,10 +53,10 @@ def main() -> int:
 
 
 def _cmd_extract_archive(args: argparse.Namespace) -> int:
-    from vidgrab.archives.extractor import ArchiveWorker
+    from vidgrab.archives.extractor import ArchiveWorker, archive_output_stem
 
     archive: Path = args.archive
-    output: Path = args.output or archive.parent / archive.stem
+    output: Path = args.output or archive.parent / archive_output_stem(archive)
     worker = ArchiveWorker(args.password_file, binary=args.binary)
     result = worker.process(archive, output)
     if result.success:

@@ -11,9 +11,11 @@ from vidgrab.archives.extractor import (
     ArchiveResult,
     ArchiveWorker,
     _STAGING_SUFFIX,
+    archive_output_stem,
     extract_archive,
     is_archive_first_part,
     probe_password,
+    validate_archive_members,
     wait_for_stable_size,
 )
 
@@ -37,22 +39,38 @@ class FakeRunner:
 
 
 class SmartPasswordRunner:
-    """Runner that returns success only for a specific correct password."""
+    """Runner that returns success only for a specific correct password.
 
-    def __init__(self, correct_password: str) -> None:
+    Handles probe ("t"), list ("l"), and extract ("x") subcommands.
+    ``member_paths`` controls what paths appear in list output (default: one
+    safe file so validation always passes unless overridden).
+    """
+
+    def __init__(
+        self,
+        correct_password: str,
+        member_paths: list[str] | None = None,
+    ) -> None:
         self.correct_password = correct_password
+        self.member_paths = member_paths or ["file.txt"]
         self.commands: list[tuple[list[str], dict]] = []
 
     def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.commands.append((list(cmd), dict(kwargs)))
-        # cmd[2] is "-p<password>"
-        password = cmd[2][2:]  # strip leading "-p"
+        # Scan args for -p<password> rather than relying on a fixed position.
+        password = next((a[2:] for a in cmd if a.startswith("-p")), "")
         subcommand = cmd[1]
         if subcommand == "t":
             rc = 0 if password == self.correct_password else 1
-        else:
-            rc = 0
-        return subprocess.CompletedProcess(cmd, rc, "", "")
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        if subcommand == "l":
+            if password != self.correct_password:
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            # Produce -slt-style output: each entry preceded by "----------"
+            stdout = "\n".join(f"----------\nPath = {p}" for p in self.member_paths)
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+        # "x" and anything else: always succeed
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
 # ---------------------------------------------------------------------------
@@ -399,11 +417,16 @@ def test_archive_worker_failed_extraction_leaves_no_output_dir(tmp_path: Path) -
     out = tmp_path / "out"
 
     class ProbeOkExtractFail:
-        """Runner that passes the test command but fails extraction."""
+        """Runner that passes probe and list commands but fails extraction."""
 
         def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            rc = 0 if cmd[1] == "t" else 2
-            return subprocess.CompletedProcess(cmd, rc, "", "")
+            subcommand = cmd[1]
+            if subcommand == "t":
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if subcommand == "l":
+                return subprocess.CompletedProcess(cmd, 0, "----------\nPath = file.txt", "")
+            # "x"
+            return subprocess.CompletedProcess(cmd, 2, "", "")
 
     worker = ArchiveWorker(pw_file, binary="7zz", runner=ProbeOkExtractFail())
     result = worker.process(archive, out)
@@ -440,3 +463,166 @@ def test_archive_worker_extraction_uses_staging_path_not_output_dir(tmp_path: Pa
     staging = out.parent / (out.name + _STAGING_SUFFIX)
     assert dest_used == staging, f"7zz should extract to staging dir {staging}, got {dest_used}"
     assert not dest_used.name == out.name, "7zz must not extract directly into final output dir"
+
+
+# ---------------------------------------------------------------------------
+# _extract_atomic: output_dir already exists
+# ---------------------------------------------------------------------------
+
+def test_extract_atomic_returns_failure_when_output_dir_already_exists(tmp_path: Path) -> None:
+    """Rename onto an existing output_dir must produce ArchiveResult failure, not an exception."""
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("correct\n", encoding="utf-8")
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    out = tmp_path / "out"
+    out.mkdir()  # pre-create the destination
+
+    runner = SmartPasswordRunner(correct_password="correct")
+    worker = ArchiveWorker(pw_file, binary="7zz", runner=runner)
+    result = worker.process(archive, out)
+
+    staging = out.parent / (out.name + _STAGING_SUFFIX)
+    assert result.success is False
+    assert result.error is not None
+    assert not staging.exists(), "staging dir must be cleaned up even on rename failure"
+
+
+# ---------------------------------------------------------------------------
+# validate_archive_members
+# ---------------------------------------------------------------------------
+
+def test_validate_archive_members_allows_safe_paths(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    safe_output = "----------\nPath = subdir/file.txt\n----------\nPath = other.txt"
+    runner = FakeRunner(returncode=0, stdout=safe_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_archive_members_rejects_absolute_unix_path(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = /etc/passwd"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+
+
+def test_validate_archive_members_rejects_dotdot_traversal(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = ../../../etc/passwd"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+
+
+def test_validate_archive_members_rejects_windows_absolute_path(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = C:\\Windows\\evil.dll"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+
+
+def test_validate_archive_members_returns_false_when_list_fails(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    runner = FakeRunner(returncode=1)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+
+
+def test_validate_archive_members_ignores_paths_before_first_separator(tmp_path: Path) -> None:
+    """Archive-info header block (before first '----------') must not be validated."""
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    # /etc/passwd appears only in the header block, not in a member entry
+    output = "Path = /etc/passwd\nType = zip\n\n----------\nPath = safe.txt"
+    runner = FakeRunner(returncode=0, stdout=output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_archive_members_builds_correct_list_command(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    runner = FakeRunner(returncode=0, stdout="")
+    validate_archive_members(archive, "secret", binary="7zz", runner=runner)
+    cmd, kwargs = runner.commands[0]
+    assert cmd[0] == "7zz"
+    assert cmd[1] == "l"
+    assert "-slt" in cmd
+    assert "-psecret" in cmd
+    assert str(archive) in cmd
+    assert kwargs.get("shell", False) is False
+
+
+# ---------------------------------------------------------------------------
+# Worker blocks path traversal end-to-end
+# ---------------------------------------------------------------------------
+
+def test_archive_worker_blocks_path_traversal_before_extraction(tmp_path: Path) -> None:
+    """Worker returns failure without extracting if a member path is unsafe."""
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("correct\n", encoding="utf-8")
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    out = tmp_path / "out"
+
+    class TraversalRunner:
+        def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            subcommand = cmd[1]
+            if subcommand == "t":
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if subcommand == "l":
+                return subprocess.CompletedProcess(
+                    cmd, 0, "----------\nPath = ../../../etc/passwd", ""
+                )
+            raise AssertionError("extract must not be called when traversal detected")
+
+    worker = ArchiveWorker(pw_file, binary="7zz", runner=TraversalRunner())
+    result = worker.process(archive, out)
+
+    assert result.success is False
+    assert result.error is not None
+    assert not out.exists(), "output dir must not be created when traversal is detected"
+
+
+# ---------------------------------------------------------------------------
+# archive_output_stem
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        # 7z split volumes: strip .NNN then .7z
+        ("bundle.7z.001", "bundle"),
+        ("bundle.7z.002", "bundle"),
+        ("bundle.7z.010", "bundle"),
+        # RAR multi-part: strip .partNN.rar
+        ("bundle.part01.rar", "bundle"),
+        ("bundle.part1.rar", "bundle"),
+        ("bundle.part10.rar", "bundle"),
+        ("bundle.part001.rar", "bundle"),
+        # plain single-volume archives: use stem
+        ("bundle.zip", "bundle"),
+        ("bundle.7z", "bundle"),
+        ("bundle.rar", "bundle"),
+        # dotted base name preserved
+        ("my.archive.zip", "my.archive"),
+        ("my.archive.7z.001", "my.archive"),
+        ("my.archive.part01.rar", "my.archive"),
+    ],
+)
+def test_archive_output_stem(filename: str, expected: str) -> None:
+    assert archive_output_stem(Path(filename)) == expected

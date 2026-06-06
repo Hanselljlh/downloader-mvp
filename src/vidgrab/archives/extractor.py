@@ -97,7 +97,14 @@ def probe_password(
     binary: str = "7zz",
     runner: SevenZipRunner = subprocess.run,
 ) -> bool:
-    """Return True if *password* successfully opens *archive* (7zz t command)."""
+    """Return True if *password* successfully opens *archive* (7zz t command).
+
+    SECURITY NOTE: 7zz does not support reading passwords from stdin in
+    non-interactive/batch mode, so the password is embedded in the ``-p``
+    command-line argument.  It may therefore be visible to other local
+    processes via ``/proc/<pid>/cmdline`` or tools such as ``ps``.
+    Passwords are never written to log output by this module.
+    """
     cmd = [binary, "t", f"-p{password}", str(archive)]
     result = runner(cmd, capture_output=True, text=True, check=False)
     return result.returncode == 0
@@ -111,10 +118,79 @@ def extract_archive(
     binary: str = "7zz",
     runner: SevenZipRunner = subprocess.run,
 ) -> bool:
-    """Extract *archive* into *dest* using *password*.  Returns True on success."""
+    """Extract *archive* into *dest* using *password*.  Returns True on success.
+
+    SECURITY NOTE: see ``probe_password`` — the same ``-p`` limitation applies.
+    """
     cmd = [binary, "x", f"-p{password}", f"-o{dest}", "-y", str(archive)]
     result = runner(cmd, capture_output=True, text=True, check=False)
     return result.returncode == 0
+
+
+def _is_safe_member_path(member_path: str) -> bool:
+    """Return True if *member_path* contains no absolute reference or '..' traversal."""
+    normalised = member_path.replace("\\", "/")
+    parts = [p for p in normalised.split("/") if p]
+    if ".." in parts:
+        return False
+    if normalised.startswith("/"):
+        return False
+    # Windows drive-letter absolute path (e.g. "C:/...")
+    if len(normalised) >= 2 and normalised[1] == ":":
+        return False
+    return True
+
+
+def validate_archive_members(
+    archive: Path,
+    password: str,
+    *,
+    binary: str = "7zz",
+    runner: SevenZipRunner,
+) -> tuple[bool, str | None]:
+    """Return ``(True, None)`` if all member paths are safe, ``(False, reason)`` otherwise.
+
+    Uses ``7zz l -slt`` to enumerate archive members and rejects any entry
+    whose path is absolute or contains ``..`` (directory traversal).  Only
+    entries after the first ``----------`` separator are inspected so that the
+    archive-info header block is not treated as member data.
+    """
+    cmd = [binary, "l", "-slt", f"-p{password}", str(archive)]
+    result = runner(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return False, "could not list archive members"
+
+    past_header = False
+    for line in result.stdout.splitlines():
+        if line.startswith("----------"):
+            past_header = True
+            continue
+        if past_header and line.startswith("Path = "):
+            member_path = line[7:]
+            if not _is_safe_member_path(member_path):
+                return False, f"unsafe member path: {member_path}"
+
+    return True, None
+
+
+def archive_output_stem(path: Path) -> str:
+    """Return the base archive name without split-volume suffixes.
+
+    Examples::
+
+        bundle.7z.001  → "bundle"
+        bundle.part01.rar → "bundle"
+        bundle.zip     → "bundle"
+    """
+    name = path.name
+    if _7Z_SPLIT_RE.search(name):
+        # e.g. bundle.7z.001 → stem = "bundle.7z" → stem again = "bundle"
+        return Path(path.stem).stem
+    m = _RAR_PART_RE.search(name)
+    if m:
+        # e.g. bundle.part01.rar → name[:start_of_.part] = "bundle"
+        return name[: m.start()]
+    return path.stem
 
 
 @dataclass
@@ -176,6 +252,11 @@ class ArchiveWorker:
             logger.debug("Testing password %d/%d", index + 1, total)
             if probe_password(archive, password, binary=self.binary, runner=self.runner):
                 logger.debug("Password accepted at position %d/%d", index + 1, total)
+                safe, reason = validate_archive_members(
+                    archive, password, binary=self.binary, runner=self.runner
+                )
+                if not safe:
+                    return ArchiveResult(success=False, error=f"unsafe archive: {reason}")
                 return self._extract_atomic(archive, output_dir, password)
 
         return ArchiveResult(success=False, error="no working password found")
@@ -192,6 +273,11 @@ class ArchiveWorker:
         staging.mkdir(parents=True, exist_ok=False)
         try:
             if extract_archive(archive, staging, password, binary=self.binary, runner=self.runner):
+                if output_dir.exists():
+                    return ArchiveResult(
+                        success=False,
+                        error=f"output directory already exists: {output_dir}",
+                    )
                 staging.rename(output_dir)
                 return ArchiveResult(success=True, extracted_to=output_dir)
             return ArchiveResult(success=False, error="extraction command failed")
