@@ -599,6 +599,74 @@ def test_archive_worker_blocks_path_traversal_before_extraction(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
+# validate_archive_members — Link = field (symlink / hard-link targets)
+# ---------------------------------------------------------------------------
+
+def test_validate_archive_members_allows_safe_link_target(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    safe_output = "----------\nPath = link_name\nLink = safe/target.txt"
+    runner = FakeRunner(returncode=0, stdout=safe_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_archive_members_allows_relative_link_target(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    safe_output = "----------\nPath = dir/link\nLink = sibling/file.txt"
+    runner = FakeRunner(returncode=0, stdout=safe_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_archive_members_rejects_traversal_link_target(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = evil_link\nLink = ../../../etc/passwd"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+    assert "link" in reason.lower()
+
+
+def test_validate_archive_members_rejects_absolute_link_target(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = evil_link\nLink = /etc/passwd"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+    assert "link" in reason.lower()
+
+
+def test_validate_archive_members_rejects_windows_absolute_link_target(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    bad_output = "----------\nPath = evil_link\nLink = C:\\Windows\\evil.dll"
+    runner = FakeRunner(returncode=0, stdout=bad_output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is False
+    assert reason is not None
+    assert "link" in reason.lower()
+
+
+def test_validate_archive_members_ignores_link_before_first_separator(tmp_path: Path) -> None:
+    """Link = lines in the archive-info header block must not be validated."""
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    output = "Link = /etc/passwd\n----------\nPath = safe.txt"
+    runner = FakeRunner(returncode=0, stdout=output)
+    ok, reason = validate_archive_members(archive, "pass", binary="7zz", runner=runner)
+    assert ok is True
+    assert reason is None
+
+
+# ---------------------------------------------------------------------------
 # archive_output_stem
 # ---------------------------------------------------------------------------
 

@@ -165,10 +165,16 @@ def validate_archive_members(
         if line.startswith("----------"):
             past_header = True
             continue
-        if past_header and line.startswith("Path = "):
+        if not past_header:
+            continue
+        if line.startswith("Path = "):
             member_path = line[7:]
             if not _is_safe_member_path(member_path):
                 return False, f"unsafe member path: {member_path}"
+        elif line.startswith("Link = "):
+            link_target = line[7:]
+            if not _is_safe_member_path(link_target):
+                return False, f"unsafe link target: {link_target}"
 
     return True, None
 
