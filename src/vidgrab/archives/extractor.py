@@ -284,7 +284,13 @@ class ArchiveWorker:
                         success=False,
                         error=f"output directory already exists: {output_dir}",
                     )
-                staging.rename(output_dir)
+                try:
+                    staging.rename(output_dir)
+                except OSError as exc:
+                    return ArchiveResult(
+                        success=False,
+                        error=f"failed to publish extraction: {exc}",
+                    )
                 return ArchiveResult(success=True, extracted_to=output_dir)
             return ArchiveResult(success=False, error="extraction command failed")
         finally:

@@ -438,6 +438,37 @@ def test_archive_worker_failed_extraction_leaves_no_output_dir(tmp_path: Path) -
     assert not staging.exists(), "staging dir must be cleaned up on extraction failure"
 
 
+def test_extract_atomic_returns_failure_on_rename_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OSError from rename (e.g. TOCTOU race where output_dir is created between exists
+    check and rename) must be caught and returned as ArchiveResult failure, not propagated."""
+    pw_file = tmp_path / "passwords.txt"
+    pw_file.write_text("correct\n", encoding="utf-8")
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(b"fake")
+    out = tmp_path / "out"
+
+    original_rename = Path.rename
+
+    def rename_raising_on_target(self: Path, target: Path | str) -> Path:
+        # Simulate another process creating the directory just before our rename.
+        if Path(target) == out:
+            raise OSError("File exists")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename_raising_on_target)
+
+    runner = SmartPasswordRunner(correct_password="correct")
+    worker = ArchiveWorker(pw_file, binary="7zz", runner=runner)
+    result = worker.process(archive, out)
+
+    staging = out.parent / (out.name + _STAGING_SUFFIX)
+    assert result.success is False
+    assert result.error is not None and "failed to publish extraction" in result.error
+    assert not staging.exists(), "staging dir must be cleaned up after rename failure"
+
+
 def test_archive_worker_extraction_uses_staging_path_not_output_dir(tmp_path: Path) -> None:
     """7zz -o argument must point to the staging dir, not the final output dir."""
     pw_file = tmp_path / "passwords.txt"
