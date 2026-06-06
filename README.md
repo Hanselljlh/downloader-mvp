@@ -18,13 +18,16 @@ This is **not** an installed webserver. The planned UI is a portable desktop app
 
 ## Current status
 
-Initial repo scaffold with tested core primitives:
+Tested core primitives plus the first portable desktop shell:
 
 - URL extraction from copied page text/HTML
 - LinkGrabber category detection
 - crawl-depth helper with default depth 2
+- LinkGrabber table state for pasted/scanned rows
+- category checkbox filtering without losing scan results
+- local PySide6 desktop window entry point, not a background webserver
 - archive password-list loader that reloads from disk every call
-- minimal CLI for testing these pieces
+- minimal CLI for testing and launching these pieces
 
 ## Intended stack
 
@@ -73,6 +76,12 @@ Check password-list loading without printing real passwords:
 
 ```bash
 python -m vidgrab.cli passwords passwords.txt
+```
+
+Launch the desktop LinkGrabber shell after installing project dependencies:
+
+```bash
+vidgrab gui
 ```
 
 ## JDownloader fork/reference use
