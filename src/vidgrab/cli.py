@@ -17,6 +17,8 @@ def main() -> int:
     passwords = subcommands.add_parser("passwords", help="Load password list as the archive worker would")
     passwords.add_argument("path", type=Path)
 
+    subcommands.add_parser("gui", help="Launch the portable desktop LinkGrabber shell")
+
     args = parser.parse_args()
     if args.command == "scan-text":
         for url in extract_urls_from_clipboard_text(args.path.read_text(encoding="utf-8")):
@@ -27,6 +29,10 @@ def main() -> int:
             label = "<blank>" if password == "" else "*" * len(password)
             print(label)
         return 0
+    if args.command == "gui":
+        from vidgrab.desktop import run_desktop_app
+
+        return run_desktop_app()
     return 1
 
 
