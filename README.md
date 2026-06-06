@@ -27,6 +27,9 @@ Tested core primitives plus the first portable desktop shell:
 - category checkbox filtering without losing scan results
 - local PySide6 desktop window entry point, not a background webserver
 - archive password-list loader that reloads from disk every call
+- **archive extraction worker** — detects first parts of multi-volume archives,
+  waits for stable download size, hot-reloads a password list, and extracts via
+  7zz using atomic staging (partial extractions never appear in the output dir)
 - minimal CLI for testing and launching these pieces
 
 ## Intended stack
@@ -83,6 +86,29 @@ Launch the desktop LinkGrabber shell after installing project dependencies:
 ```bash
 vidgrab gui
 ```
+
+### Archive worker
+
+Manually run the extraction worker against a single archive and password list:
+
+```bash
+vidgrab extract-archive /path/to/bundle.zip /path/to/passwords.txt
+# outputs are placed in /path/to/bundle/ by default
+
+vidgrab extract-archive archive.7z.001 passwords.txt --output /downloads/content --binary 7zz
+```
+
+The worker will:
+
+1. Reject non-first split parts (e.g. `.7z.002`, `.part2.rar`).
+2. Wait up to 5 minutes for the archive file size to stabilise (safe for in-progress downloads).
+3. Hot-reload the password list from disk before testing.
+4. Try each password with `7zz t` until one succeeds.
+5. Extract to a staging directory (`<output>._extracting`), then atomically rename it
+   to the final output directory so partial extractions are never visible on disk.
+
+The `--binary` flag lets you point at a locally unpacked `7zz` binary without adding it
+to `PATH`, which is useful for portable deployments.
 
 ## JDownloader fork/reference use
 
